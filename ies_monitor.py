@@ -4,6 +4,11 @@
 import sys
 import pymysql
 import sqlite3
+import socket
+import json
+import time
+import threading
+import os
 
 from PyQt5 import QtCore, QtGui, QtWidgets, uic
 from message_dialog import Ui_Dialog
@@ -20,7 +25,20 @@ class MainWindow(QtWidgets.QMainWindow):
 
         uic.loadUi('main_window.ui', self)
 
+        finish = QtWidgets.QAction("Quit", self)
+
+        finish.triggered.connect(self.closeEvent)
+
         self.message_table.doubleClicked.connect(self.row_double_clicked)
+
+        # ies_monitoring_server ის ip-ი მისამართი
+        self.server_ip = "10.0.0.124"
+
+        # ies_monitoring_server ის port-ი
+        self.server_port = 54321
+
+        # ies_monitor აპლიკაციის სახელი (თითოეული კომპიუტერისთვის სხვადასხვა)
+        self.ies_monitor_name = "ies_monitor"
 
         self.mysql_server_ip = "localhost"
 
@@ -36,15 +54,110 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.mysql_table_col_readable_names = ["ID", "Time", "Message Type", "Message Title", "Message", "Client IP", "Script Name"]
 
+        threading.Thread(target=self.accept_connections).start()
+
+        self.connect_ies_monitoring_server()
+
         self.set_qtablewidget_style()
 
         self.connect_to_mysql()
 
-        self.get_message_data()
+        self.get_message_data(self.cursor)
 
         self.connect_to_sqlite()
 
         self.check_opened_messages()
+
+    def start_listening(self):
+        """ ფუნქცია ხსნის პორტს და იწყებს მოსმენას """
+
+        # შევქმნათ სოკეტი
+        self.listen_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        # ვუთითებთ სოკეტის პარამეტრებს
+        self.listen_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # მოსმენის დაწყება
+        self.listen_connection_socket.bind((self.server_ip, self.server_port))
+
+        # ვუთითებთ მაქსიმალურ კლიენტების რაოდენობას ვინც ელოდება კავშირის დამყარებაზე თანხმობას
+        self.listen_connection_socket.listen(10)
+
+        # self.connection.logger.debug("სოკეტის ინიციალიზაცია")
+
+    def connect_ies_monitoring_server(self):
+        """ფუნქცია ქმნის სოკეტს და უკავშირდება ies_monitoring_server-ს """
+        ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+        ies_monitor_server_port = 12345
+
+        # სერვერთან გასაგზავნი შეტყობინება
+        server_message = {}
+
+        # დავუკავშირდეთ ies_monitoring_server-ს და დავაბრუნოთ connection ობიექტი
+        try:
+            ies_monitor_connection.connect((self.server_ip, ies_monitor_server_port))
+            server_message = {self.ies_monitor_name: self.listen_connection_socket.getsockname()}
+            print(type(server_message))
+
+            server_message_byte = bytes(json.dumps(server_message), 'utf-8')
+            ies_monitor_connection.send(server_message_byte)
+            print("სერვერთან დამყარდა კავშირი: " + str(ies_monitor_connection.getpeername()))
+            ies_monitor_connection.shutdown(socket.SHUT_RDWR)
+            ies_monitor_connection.close()
+        except Exception as ex:
+            print("სერვერთან კავშირი ვერ დამყარდა. Exception: " + str(ex))
+            return False
+
+    def accept_connections(self):
+        """ ფუნქცია ელოდება client-ებს და ამყარებს კავშირს.
+        კავშირის დათანხმების შემდეგ იძახებს connection_hendler - ფუნქციას """
+
+        print("პროგრამა მზად არის შეტყობინების მისაღებად...")
+
+        self.start_listening()
+
+        while True:
+            try:
+                # თუ client-ი მზად არის კავშირის დასამყარებლად დავეთანხმოთ
+                listen_connection, addr = self.listen_connection_socket.accept()
+
+                # თითოეულ დაკავშირებულ client-ისთვის შევქმნათ და გავუშვათ
+                # ცალკე thread-ი client_handler_thread ფუნქციის საშუალებით
+                threading.Thread(target=self.wait_for_server, args=(listen_connection,)).start()
+            except Exception as ex:
+                print("კლიენტი ვერ გვიკავშირდება\n" + str(ex))
+                pass
+
+    def wait_for_server(self, listen_connection):
+
+        # მესიჯის buffer_size
+        buffer_size = 8192
+
+        while True:
+            # წიკლის შეჩერება 0.2 წამით
+            time.sleep(0.2)
+
+            # შევამოწმოთ თუ სერვერთან გვაქვს კავშირი
+
+            # წავიკითხოთ connection ობიექტზე მიღებუი ინფორმაცია
+            # წაკითხვა ხდება bytes ტიპში (connection.recv აბრუნებს bytes ობიექტს)
+            received_message_bytes = listen_connection.recv(buffer_size)
+
+            # bytes გადავიყვანოთ string ტიპში
+            received_message_id = received_message_bytes.decode("utf-8")
+
+            print(received_message_id)
+
+            self.cursor_thread = self.mysql_connection.cursor(pymysql.cursors.DictCursor)
+
+            self.get_message_data(self.cursor_thread)
+
+            self.connect_to_sqlite()
+
+            self.check_opened_messages()
+
+            break
 
     def check_opened_messages(self):
         """ ვამოწმებთ წაკითხული შეტყობინებების ბაზას და ვუცვლით ფერს
@@ -87,7 +200,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.load_message['message_id'] in self.get_id:
             pass
         else:
-            print(self.load_message['message_id'])
             self.sqlite_cursor.execute("""INSERT INTO "opened_messages" ("message_id","status") VALUES ('{}','{}')
                            """.format(self.load_message['message_id'], 1))
             self.conn.commit()
@@ -99,13 +211,13 @@ class MainWindow(QtWidgets.QMainWindow):
         """ ფუნქცია უკავშირდება Mysql სერვერს"""
 
         try:
-            mysql_connection = pymysql.connect(self.mysql_server_ip,
-                                               self.mysql_server_user,
-                                               self.mysql_user_pass,
-                                               self.mysql_database_name,
-                                               port=self.mysql_server_port)
+            self.mysql_connection = pymysql.connect(self.mysql_server_ip,
+                                                    self.mysql_server_user,
+                                                    self.mysql_user_pass,
+                                                    self.mysql_database_name,
+                                                    port=self.mysql_server_port)
             print("მონაცემთა ბაზასთან კავშირი დამყარებულია")
-            self.cursor = mysql_connection.cursor(pymysql.cursors.DictCursor)
+            self.cursor = self.mysql_connection.cursor(pymysql.cursors.DictCursor)
         except Exception as ex:
             print("მონაცემთა ბაზასთან კავშირი წარუმატებელია\n" + str(ex))
             return False
@@ -124,8 +236,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # ვანიჭებთ სვეტებს შესაბამის სახელებს
         self.message_table.setHorizontalHeaderLabels(self.mysql_table_col_readable_names)
         self.message_table.setColumnHidden(4, True)
+        self.message_table.setColumnHidden(0, True)
+        # self.message_table.horizontalHeader().setStretchLastSection(True)
+        self.message_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.message_table.horizontalHeader().setSectionsMovable(True)
 
-    def get_message_data(self):
+    def get_message_data(self, cursor):
         """ mysql ბაზიდან კითხულობს შეტყობინებებს და სვავს message_table -ის შესაბამის სტრიქონში """
 
         # წაკითხული შეტყობინებები
@@ -134,6 +250,7 @@ class MainWindow(QtWidgets.QMainWindow):
         query = "SELECT " + ", ".join(self.mysql_table_col_names) + " FROM messages LIMIT 30"
         self.cursor.execute(query)
         self.message_data = self.cursor.fetchall()
+        self.mysql_connection.commit()
         self.message_table.setRowCount(0)
         for row_index, row in enumerate(self.message_data):
             self.message_table.insertRow(row_index)
@@ -157,9 +274,15 @@ class MainWindow(QtWidgets.QMainWindow):
         for row_index, row in enumerate(self.message_data):
             if row_index == selected_row_index[0]:
                 self.load_message = row
+
         self.load_message_data()
+
+        self.connect_to_sqlite()
+
         self.insert_to_sqlite()
+
         self.select_message_id_sqlite()
+
         font = QtGui.QFont()
         font.setBold(False)
         if self.load_message['message_id'] in self.get_id:
@@ -180,9 +303,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.script_name.setText(self.load_message['client_script_name'])
         self.ui.text.setPlainText(self.load_message['text'])
 
+    def closeEvent(self, event):
+        close = QtWidgets.QMessageBox.question(self,
+                                               "QUIT",
+                                               "Sure?",
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        if close == QtWidgets.QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore()
+
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     main_window = MainWindow()
     main_window.show()
-    sys.exit(app.exec_())
+    os._exit(app.exec_())
