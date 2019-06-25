@@ -92,7 +92,7 @@ class MainWindow(QtWidgets.QMainWindow):
             print("კავშირი გაწყდა")
             while True:
                 print("ვუკავშირდებით ხელმეორედ")
-                time.sleep(3)
+                time.sleep(300)
                 self.reconnect_ies_monitoring_server()
                 if self.must_close:
                     break
