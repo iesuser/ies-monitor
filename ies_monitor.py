@@ -31,11 +31,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.message_table.doubleClicked.connect(self.row_double_clicked)
 
-        # ies_monitoring_server ის ip-ი მისამართი
-        self.server_ip = "10.0.0.124"
-
-        # ies_monitoring_server ის port-ი
-        self.server_port = 54321
+        # ies_monitor ის port-ი რომელზედაც ვიღებთ სერვერიდან შეტყობინებას
+        self.ies_monitor_port = 54321
 
         # ies_monitor აპლიკაციის სახელი (თითოეული კომპიუტერისთვის სხვადასხვა)
         self.ies_monitor_name = "ies_monitor"
@@ -54,9 +51,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.mysql_table_col_readable_names = ["ID", "Time", "Message Type", "Message Title", "Message", "Client IP", "Script Name"]
 
-        threading.Thread(target=self.accept_connections).start()
+        threading.Thread(target=self.connect_ies_monitoring_server).start()
 
-        self.connect_ies_monitoring_server()
+        threading.Thread(target=self.wait_for_server_message).start()
 
         self.set_qtablewidget_style()
 
@@ -68,68 +65,92 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.check_opened_messages()
 
-    def start_listening(self):
-        """ ფუნქცია ხსნის პორტს და იწყებს მოსმენას """
-
-        # შევქმნათ სოკეტი
-        self.listen_connection_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-        # ვუთითებთ სოკეტის პარამეტრებს
-        self.listen_connection_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        # მოსმენის დაწყება
-        self.listen_connection_socket.bind((self.server_ip, self.server_port))
-
-        # ვუთითებთ მაქსიმალურ კლიენტების რაოდენობას ვინც ელოდება კავშირის დამყარებაზე თანხმობას
-        self.listen_connection_socket.listen(10)
-
-        # self.connection.logger.debug("სოკეტის ინიციალიზაცია")
-
     def connect_ies_monitoring_server(self):
         """ფუნქცია ქმნის სოკეტს და უკავშირდება ies_monitoring_server-ს """
-        ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        ies_monitor_server_port = 12345
+        # ies_monitoring_server ის ip-ი მისამართი
+        self.ies_monitoring_server_ip = "10.0.0.142"
 
-        # სერვერთან გასაგზავნი შეტყობინება
-        server_message = {}
+        # ies_monitoring_server ის პორტი
+        self.ies_monitoring_server_port = 12345
 
         # დავუკავშირდეთ ies_monitoring_server-ს და დავაბრუნოთ connection ობიექტი
         try:
-            ies_monitor_connection.connect((self.server_ip, ies_monitor_server_port))
-            server_message = {self.ies_monitor_name: self.listen_connection_socket.getsockname()}
-            print(type(server_message))
+            self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
 
+            # სერვერთან გასაგზავნი შეტყობინება
+            server_message = {self.ies_monitor_name: [self.ies_monitor_connection.getsockname()[0], self.ies_monitor_port]}
+            print(type(self.ies_monitor_connection.getsockname()[0]))
             server_message_byte = bytes(json.dumps(server_message), 'utf-8')
-            ies_monitor_connection.send(server_message_byte)
-            print("სერვერთან დამყარდა კავშირი: " + str(ies_monitor_connection.getpeername()))
-            ies_monitor_connection.shutdown(socket.SHUT_RDWR)
-            ies_monitor_connection.close()
-        except Exception as ex:
-            print("სერვერთან კავშირი ვერ დამყარდა. Exception: " + str(ex))
-            return False
 
-    def accept_connections(self):
+            self.ies_monitor_connection.send(server_message_byte)
+            print("ies_monitoring_server-თან დამყარდა კავშირი: " + str(self.ies_monitor_connection.getpeername()))
+            # self.ies_monitor_connection.shutdown(socket.SHUT_RDWR)
+            # self.ies_monitor_connection.close()
+            self.ies_monitor_connection.recv(2048)
+            print("კავშირი გაწყდა")
+            while True:
+                print("ვუკავშირდებით ხელმეორედ")
+                time.sleep(3)
+                self.reconnect_ies_monitoring_server()
+                if self.must_close:
+                    break
+        except Exception as ex:
+            print("ies_monitoring_server-თან კავშირი ვერ დამყარდა. Exception: " + str(ex))
+
+    def reconnect_ies_monitoring_server(self):
+        try:
+            self.ies_monitor_connection.close()
+            self.ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
+
+            # სერვერთან გასაგზავნი შეტყობინება
+            server_message = {self.ies_monitor_name: [self.ies_monitor_connection.getsockname()[0], self.ies_monitor_port]}
+            print(type(self.ies_monitor_connection.getsockname()[0]))
+            server_message_byte = bytes(json.dumps(server_message), 'utf-8')
+
+            self.ies_monitor_connection.send(server_message_byte)
+            print("ies_monitoring_server-თან კავშირი დამყარდა ხელმეორედ: " + str(self.ies_monitor_connection.getpeername()))
+            self.must_close = True
+            # self.ies_monitor_connection.shutdown(socket.SHUT_RDWR)
+            # self.ies_monitor_connection.close()
+        except Exception as ex:
+            self.must_close = False
+            print("ies_monitoring_server-ს ვერ ვუკავშირდებით. Exception: " + str(ex))
+
+    def wait_for_server_message(self):
         """ ფუნქცია ელოდება client-ებს და ამყარებს კავშირს.
         კავშირის დათანხმების შემდეგ იძახებს connection_hendler - ფუნქციას """
 
-        print("პროგრამა მზად არის შეტყობინების მისაღებად...")
+        # იქმნება სოკეტი
+        wait_for_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        self.start_listening()
+        # ies_monitor ის ip-ი მისამართი
+        ies_monitor_ip = self.ies_monitor_connection.getsockname()[0]
+
+        # ვუთითებთ სოკეტის პარამეტრებს
+        wait_for_server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # მოსმენის დაწყება
+        wait_for_server_socket.bind((ies_monitor_ip, self.ies_monitor_port))
+
+        # ვუთითებთ მაქსიმალურ კლიენტების რაოდენობას ვინც ელოდება კავშირის დამყარებაზე თანხმობას
+        wait_for_server_socket.listen(10)
 
         while True:
             try:
                 # თუ client-ი მზად არის კავშირის დასამყარებლად დავეთანხმოთ
-                listen_connection, addr = self.listen_connection_socket.accept()
+                listen_connection, addr = wait_for_server_socket.accept()
 
                 # თითოეულ დაკავშირებულ client-ისთვის შევქმნათ და გავუშვათ
                 # ცალკე thread-ი client_handler_thread ფუნქციის საშუალებით
-                threading.Thread(target=self.wait_for_server, args=(listen_connection,)).start()
+                threading.Thread(target=self.server_message_handler, args=(listen_connection,)).start()
             except Exception as ex:
                 print("კლიენტი ვერ გვიკავშირდება\n" + str(ex))
                 pass
 
-    def wait_for_server(self, listen_connection):
+    def server_message_handler(self, listen_connection):
 
         # მესიჯის buffer_size
         buffer_size = 8192
