@@ -34,9 +34,6 @@ class MainWindow(QtWidgets.QMainWindow):
         # ies_monitor ის port-ი რომელზედაც ვიღებთ სერვერიდან შეტყობინებას
         self.ies_monitor_port = 54321
 
-        # ies_monitor აპლიკაციის სახელი (თითოეული კომპიუტერისთვის სხვადასხვა)
-        self.ies_monitor_name = "ies_monitor"
-
         self.mysql_server_ip = "localhost"
 
         self.mysql_server_user = "root"
@@ -70,7 +67,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
         # ies_monitoring_server ის ip-ი მისამართი
-        self.ies_monitoring_server_ip = "10.0.0.142"
+        self.ies_monitoring_server_ip = "10.0.0.158"
 
         # ies_monitoring_server ის პორტი
         self.ies_monitoring_server_port = 12345
@@ -80,7 +77,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
 
             # სერვერთან გასაგზავნი შეტყობინება
-            server_message = {self.ies_monitor_name: [self.ies_monitor_connection.getsockname()[0], self.ies_monitor_port]}
+            server_message = {"ip": self.ies_monitor_connection.getsockname()[0],
+                              "port": self.ies_monitor_port,
+                              "who_am_i": "ies_monitor"}
             print(type(self.ies_monitor_connection.getsockname()[0]))
             server_message_byte = bytes(json.dumps(server_message), 'utf-8')
 
@@ -92,7 +91,7 @@ class MainWindow(QtWidgets.QMainWindow):
             print("კავშირი გაწყდა")
             while True:
                 print("ვუკავშირდებით ხელმეორედ")
-                time.sleep(300)
+                time.sleep(3)
                 self.reconnect_ies_monitoring_server()
                 if self.must_close:
                     break
@@ -106,7 +105,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
 
             # სერვერთან გასაგზავნი შეტყობინება
-            server_message = {self.ies_monitor_name: [self.ies_monitor_connection.getsockname()[0], self.ies_monitor_port]}
+            server_message = {"ip": self.ies_monitor_connection.getsockname()[0],
+                              "port": self.ies_monitor_port,
+                              "who_am_i": "ies_monitor"}
             print(type(self.ies_monitor_connection.getsockname()[0]))
             server_message_byte = bytes(json.dumps(server_message), 'utf-8')
 
@@ -153,7 +154,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def server_message_handler(self, listen_connection):
 
         # მესიჯის buffer_size
-        buffer_size = 8192
+        buffer_size = 2048
 
         while True:
             # წიკლის შეჩერება 0.2 წამით
@@ -166,19 +167,20 @@ class MainWindow(QtWidgets.QMainWindow):
             received_message_bytes = listen_connection.recv(buffer_size)
 
             # bytes გადავიყვანოთ string ტიპში
-            received_message_id = received_message_bytes.decode("utf-8")
+            received_message = received_message_bytes.decode("utf-8")
 
-            print(received_message_id)
+            print(received_message)
+            if "განაახლე ბაზა" in received_message:
 
-            self.cursor_thread = self.mysql_connection.cursor(pymysql.cursors.DictCursor)
+                self.cursor_thread = self.mysql_connection.cursor(pymysql.cursors.DictCursor)
 
-            self.get_message_data(self.cursor_thread)
+                self.get_message_data(self.cursor_thread)
 
-            self.connect_to_sqlite()
+                self.connect_to_sqlite()
 
-            self.check_opened_messages()
+                self.check_opened_messages()
 
-            break
+                break
 
     def check_opened_messages(self):
         """ ვამოწმებთ წაკითხული შეტყობინებების ბაზას და ვუცვლით ფერს
@@ -268,7 +270,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # წაკითხული შეტყობინებები
         # global message_data
 
-        query = "SELECT " + ", ".join(self.mysql_table_col_names) + " FROM messages LIMIT 30"
+        query = "SELECT " + ", ".join(self.mysql_table_col_names) + " FROM messages"
         self.cursor.execute(query)
         self.message_data = self.cursor.fetchall()
         self.mysql_connection.commit()
@@ -339,4 +341,4 @@ if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     main_window = MainWindow()
     main_window.show()
-    os._exit(app.exec_())
+    os._exit(app.exec_())  # !!!!!!!!!!!!!!!!!!
