@@ -50,8 +50,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         threading.Thread(target=self.connect_ies_monitoring_server).start()
 
-        threading.Thread(target=self.wait_for_server_message).start()
-
         self.set_qtablewidget_style()
 
         self.connect_to_mysql()
@@ -61,6 +59,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.connect_to_sqlite()
 
         self.check_opened_messages()
+
+        threading.Thread(target=self.wait_for_server_message).start()
 
     def connect_ies_monitoring_server(self):
         """ფუნქცია ქმნის სოკეტს და უკავშირდება ies_monitoring_server-ს """
@@ -75,28 +75,37 @@ class MainWindow(QtWidgets.QMainWindow):
         # დავუკავშირდეთ ies_monitoring_server-ს და დავაბრუნოთ connection ობიექტი
         try:
             self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
-
-            # სერვერთან გასაგზავნი შეტყობინება
-            server_message = {"ip": self.ies_monitor_connection.getsockname()[0],
-                              "port": self.ies_monitor_port,
-                              "who_am_i": "ies_monitor"}
-            print(type(self.ies_monitor_connection.getsockname()[0]))
-            server_message_byte = bytes(json.dumps(server_message), 'utf-8')
-
-            self.ies_monitor_connection.send(server_message_byte)
+            self.send_server_message()
             print("ies_monitoring_server-თან დამყარდა კავშირი: " + str(self.ies_monitor_connection.getpeername()))
             # self.ies_monitor_connection.shutdown(socket.SHUT_RDWR)
             # self.ies_monitor_connection.close()
             self.ies_monitor_connection.recv(2048)
-            print("კავშირი გაწყდა")
+            print("ies_monitoring_server-თან კავშირი გაწყდა")
             while True:
-                print("ვუკავშირდებით ხელმეორედ")
                 time.sleep(3)
+                print("ვუკავშირდებით ხელახლა")
                 self.reconnect_ies_monitoring_server()
                 if self.must_close:
                     break
         except Exception as ex:
             print("ies_monitoring_server-თან კავშირი ვერ დამყარდა. Exception: " + str(ex))
+            while True:
+                time.sleep(3)
+                print("ვუკავშირდებით ხელახლა")
+                self.reconnect_ies_monitoring_server()
+                if self.must_close:
+                    break
+
+    def send_server_message(self):
+        # სერვერთან გასაგზავნი შეტყობინება
+        server_message = {"ip": self.ies_monitor_connection.getsockname()[0],
+                          "port": self.ies_monitor_port,
+                          "who_am_i": "ies_monitor"}
+        print(server_message)
+        server_message_byte = bytes(json.dumps(server_message), 'utf-8')
+        # server_message_byte = bytes("", 'utf-8')
+        # time.sleep(5)
+        self.ies_monitor_connection.send(server_message_byte)
 
     def reconnect_ies_monitoring_server(self):
         try:
@@ -104,15 +113,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ies_monitor_connection = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.ies_monitor_connection.connect((self.ies_monitoring_server_ip, self.ies_monitoring_server_port))
 
-            # სერვერთან გასაგზავნი შეტყობინება
-            server_message = {"ip": self.ies_monitor_connection.getsockname()[0],
-                              "port": self.ies_monitor_port,
-                              "who_am_i": "ies_monitor"}
-            print(type(self.ies_monitor_connection.getsockname()[0]))
-            server_message_byte = bytes(json.dumps(server_message), 'utf-8')
+            self.send_server_message()
 
-            self.ies_monitor_connection.send(server_message_byte)
-            print("ies_monitoring_server-თან კავშირი დამყარდა ხელმეორედ: " + str(self.ies_monitor_connection.getpeername()))
+            print("ies_monitoring_server-თან კავშირი დამყარდა ხელახლა: " + str(self.ies_monitor_connection.getpeername()))
             self.must_close = True
             # self.ies_monitor_connection.shutdown(socket.SHUT_RDWR)
             # self.ies_monitor_connection.close()
@@ -123,6 +126,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def wait_for_server_message(self):
         """ ფუნქცია ელოდება client-ებს და ამყარებს კავშირს.
         კავშირის დათანხმების შემდეგ იძახებს connection_hendler - ფუნქციას """
+
+        time.sleep(0.5)
 
         # იქმნება სოკეტი
         wait_for_server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
