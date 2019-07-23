@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>656</width>
-    <height>523</height>
+    <width>1006</width>
+    <height>669</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -27,19 +27,6 @@
     </size>
    </property>
    <layout class="QGridLayout" name="gridLayout">
-    <item row="2" column="0">
-     <widget class="QWidget" name="widget" native="true">
-      <layout class="QHBoxLayout" name="horizontalLayout">
-       <item alignment="Qt::AlignRight|Qt::AlignVCenter">
-        <widget class="QPushButton" name="connect_btn">
-         <property name="text">
-          <string>Connect</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
-     </widget>
-    </item>
     <item row="0" column="0">
      <widget class="QTableWidget" name="message_table">
       <property name="font">
@@ -85,17 +72,16 @@
     </item>
    </layout>
   </widget>
-  <widget class="QMenuBar" name="menubar">
-   <property name="geometry">
-    <rect>
-     <x>0</x>
-     <y>0</y>
-     <width>656</width>
-     <height>25</height>
-    </rect>
+  <widget class="QStatusBar" name="statusbar">
+   <property name="cursor">
+    <cursorShape>ArrowCursor</cursorShape>
    </property>
   </widget>
-  <widget class="QStatusBar" name="statusbar"/>
+  <action name="reconnect_btn">
+   <property name="text">
+    <string>Reconnect</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>

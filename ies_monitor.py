@@ -4,7 +4,7 @@
 
 """ შენიშნები
 1. mysql -დან მონაცემების წამოღება ხდება პირდაპირი კავშირით . მოსაფიქრებელია ალტერნატიული გზა
-
+2. Segmentation fault (core dumped) ზოგჯერ წერს , სანახავია მიზეზი!!!
 """
 import sys
 import pymysql  # 0.9.3
@@ -23,7 +23,7 @@ from PyQt5 import QtCore, QtGui, QtWidgets, uic  # 5.12.2
 from message_dialog import Ui_Dialog
 
 # ies_monitor სკრიპტის ip-i რომელზედაც ვიღებთ სერვერიდან შეტყობინებას ies_monitoring_server-დან
-# ip - ს ვგებულობთ სერვერთან დაკავშირების მერე რეგისტრაციის დროს
+# ip - ს ვგებულობთ სერვერთან დაკავშირების მერე
 # არ არის საჭირო ხელით გაწერა, თავიდან არის ცარიელი
 ies_monitor_ip = ""
 
@@ -37,7 +37,7 @@ log_filename = "log"
 test_ies_monitoring_server_connection_delay = 5
 
 # ies_monitoring_server-ის ip-ი მისამართი
-ies_monitoring_server_ip = "10.0.0.113"
+ies_monitoring_server_ip = "10.0.0.153"
 
 # ies_monitoring_server-ის პორტი
 ies_monitoring_server_port = 12345
@@ -49,7 +49,7 @@ mysql_server_ip = "localhost"
 mysql_server_user = "root"
 
 # mysql-სერვერის user-ის პაროლი
-mysql_user_pass = "teqnikuri123"
+mysql_user_pass = "AcharuliXachapuri123!"
 
 # mysql-სერვერის მონაცემთა ბაზის სახელი
 mysql_database_name = "ies_monitoring_server"
@@ -59,6 +59,22 @@ mysql_server_port = 3306
 
 # მესიჯის buffer_size
 buffer_size = 2048
+
+# დაყოვნება პროგრამის ისეთ ციკლებში სადაც საჭიროა/რეკომენდირებულია შენელებული მუშაობა
+delay = 0.1
+
+
+# -------------------------------------------------------------------------------------------------
+
+
+# კონსტანტები გამოიყენება სერვერთან კავშირის სტატუსის განსაზღვრისთვის
+# სერვერთან კავშირი გაწყვეტილია
+DISCONNECTED = 0
+# სერვერთან დაკავშირებულია
+CONNECTED = 1
+# სერვერთან კავშირის შემოწმება
+TESTING = 2
+
 
 class ConsoleFormatter(logging.Formatter):
     """
@@ -123,7 +139,21 @@ class MainWindow(QtWidgets.QMainWindow):
         super(MainWindow, self).__init__()
         uic.loadUi('main_window.ui', self)
 
+        # ცვლადი რომლის საშუალებით პროგრამის დახურვისას ითიშება თრედები
         self.application_is_closing = False
+
+        # სერვერთან კავშირის სტატუსი
+        self.connection_state = DISCONNECTED
+
+        # socket - ობიექტის შექმნა
+        self.listener_socket = socket.socket()
+
+        reconnect = QtWidgets.QAction("&Reconnect", self)
+        reconnect.triggered.connect(lambda: self.send_registration_request_to_ies_monitoring_server(start_listening_thread=False))
+
+        menu_bar = self.menuBar()
+        connect_menu = menu_bar.addMenu('&Connection')
+        connect_menu.addAction(reconnect)
 
         # QAction ობიექტის შექმნა
         main_window_close_action = QtWidgets.QAction("Quit", self)
@@ -147,8 +177,11 @@ class MainWindow(QtWidgets.QMainWindow):
             "Client IP", "Script Name"
         ]
 
-        # რეგისტრაცია ies_monitor-ის ies_monitoring_server-ზე
-        self.register_to_ies_monitoring_server()
+        # ეშვება update_connection_status ფუნქცია თრედად
+        threading.Thread(target=self.update_connection_status).start()
+
+        # ეშვება communicate_to_ies_monitoring_server_thread ფუნქცია თრედად
+        threading.Thread(target=self.communicate_to_ies_monitoring_server_thread).start()
 
         # ვიძახებთ set_qtablewidget_style ფუნქციას
         self.set_qtablewidget_style()
@@ -165,7 +198,19 @@ class MainWindow(QtWidgets.QMainWindow):
         # ვიძახებთ check_opened_messages ფუნქციას
         self.check_opened_messages()
 
-    def connect_ies_monitoring_server(self):
+    def update_connection_status(self):
+        """ ფუნქცია სტატუს ბარში აჩვენებს ies_monitoring_server -თან კავშირის სტატუსს """
+
+        while self.application_is_closing is False:
+            if self.connection_state is CONNECTED:
+                self.statusbar.showMessage("CONNECTED")
+            elif self.connection_state is TESTING:
+                self.statusbar.showMessage("TESTING")
+            elif self.connection_state is DISCONNECTED:
+                self.statusbar.showMessage("DISCONNECTED")
+            time.sleep(delay)
+
+    def connect_ies_monitoring_server(self, verbose=True):
         """ ფუნქცია უკავშირდება ies_monitoring_server-ს """
 
         # connection სოკეტის შექმნა
@@ -174,9 +219,11 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             # დავუკავშირდეთ ies_monitoring_server-ს
             connection.connect((ies_monitoring_server_ip, ies_monitoring_server_port))
-            logger.info("სერვერთან კავშირი დამყარებულია")
+            if verbose is True:
+                logger.debug("სერვერთან კავშირი დამყარებულია")
         except Exception as ex:
-            logger.warning("სერვერთან კავშირი ვერ დამყარდა. " + str(ex))
+            if verbose is True:
+                logger.warning("სერვერთან კავშირი ვერ დამყარდა. " + str(ex))
             return False
         return connection
 
@@ -201,15 +248,97 @@ class MainWindow(QtWidgets.QMainWindow):
         """ json ტექსტს აკონვერტირებს dictionary ტიპში """
         return json.loads(json_text.decode("utf-8"))
 
-    def send_message_to_ies_monitor(self, message, write_to_log=True):
+    def communicate_to_ies_monitoring_server_thread(self):
         """
-            ფუნქციიის საშუალებით შეიძლება შეტყობინების გაგზავნა ies_monitor-თან.
-            write_to_log პარამეტრი გამოიყენება იმ შემთხვევაში როდესაც მესიჯის იგზავნება ძალიან ხშირად
-            და არ გვინდა ლოგ ფაილში ჩაიწეროს ბევრჯერ
+            ფუნქცია ამოწმებს სერვერთან კავშირს, კავშირის დამყარების შემთხვევაში ვგებულობთ მიმდინარე
+            ies_monitor-ის ip-ის, ეშვება listening_to_ies_monitoring_server ფუნქცია (ies_monitor-იწყებს მოსმენას)
+            და ვაგზავნით რეგისტრაციის მოთხოვნას სანამ სერვერი არ გამოაგზავნის რეგისტრაციის დადასტურებას
+
         """
 
+        # ies_monitoring_server-თან დაკავშირება
+        connection = self.connect_ies_monitoring_server(verbose=False)
+
+        # სერვერთან დაკავშირების მცდელობის დრო
+        test_server_connection_datetime = datetime.datetime.now()
+
+        # ციკლი სერვერთან დასაკავშირებლად. ციკლიდან გამოვდივართ იმ შემთხვევაში თუ
+        # კავშირი დამყარდა სერვერთან ან თუ პროგრამა იხურება
+        while connection is False and self.application_is_closing is False:
+            # შევამოწმოთ თუ სერვერთან დაკავშირების ცდიდან გავიდა test_ies_monitoring_server_connection_delay წამი
+            if (datetime.datetime.now() - test_server_connection_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
+                logger.warning("პროგრამის ჩატვირთვის პროცესში ვერ მოხერხდა სერვერთან დაკავშირება")
+                # ies_monitoring_server-თან დაკავშირება
+                connection = self.connect_ies_monitoring_server(verbose=False)
+
+                # სერვერთან დაკავშირების მცდელობის დრო
+                test_server_connection_datetime = datetime.datetime.now()
+
+            # დაყოვნება
+            time.sleep(delay)
+
+        # თუ კავშირი დამყარდა ies_monitoring_server-თან
+        if connection is not False:
+            global ies_monitor_ip
+
+            # შევინახოთ მიმდინარე ies_monitor-ის ip
+            ies_monitor_ip = connection.getsockname()[0]
+
+            logger.debug("პროგრამის ჩატვირთვის პროცესში სერვერთან კავშირი დამყარდა და განისაზღვრა "
+                         "ies_monitor-ის ip მისამართი: {}".format(ies_monitor_ip))
+            # ies_monitor-იწყებს მოსმენას
+            threading.Thread(target=self.listening_to_ies_monitoring_server).start()
+
+            self.register_to_ies_monitoring_server()
+
+    def register_to_ies_monitoring_server(self):
+        """ ფუნქცია აგზავნის რეგისტრაციის მოთხოვნას ies_monitoring_server -თან და ელოდება მისგან დასტურს """
+
+        # შეტყობინება რეგისტრაციაზე არ გაგზავნილა
+        registration_message_sent = False
+
+        self.registration_verified = False
+
+        # ციკლი სერვერთან რეგისტრაციის დასადასტურებლად
+        # ციკლიდან გამოვდივართ იმ შემთხვევაში თუ სერვერიდან მივიღეთ რეგისტრაციის მოთხოვნაზე დასტური
+        # ან თუ პროგრამა იხურება
+        while self.registration_verified is False and self.application_is_closing is False:
+            # თუ შეტყობინება არ გაგზავნილა რეგისტრაციის მოთხოვნისთვის
+            if registration_message_sent is False:
+                # რეგისტრაციის მოთხოვნის გაგზავნა
+                registration_message_sent = self.send_registration_request_to_ies_monitoring_server()
+                # რეგისტრაციის მოთხოვნის გაგზავნის მცდელობის დრო
+                try_sent_registration_datetime = datetime.datetime.now()
+
+                # ციკლი სერვერთან რეგისტრაციის შეტყობინების გასაგზავნად
+                # ციკლიდან გამოვდივართ იმ შემთხვევაში თუ რეგისრაციის შეტყობინება გაიგზავნა
+                # ან თუ პროგრამა იხურება
+                while registration_message_sent is False and self.application_is_closing is False:
+                    # შევამოწმოთ თუ სერვერთან რეგისტრაციის შეტყობინების გაგზავნის ცდიდან გავიდა test_ies_monitoring_server_connection_delay წამი
+                    if (datetime.datetime.now() - try_sent_registration_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
+                        # რეგისტრაციის მოთხოვნის გაგზავნა
+                        registration_message_sent = self.send_registration_request_to_ies_monitoring_server()
+
+                        # რეგისტრაციის მოთხოვნის გაგზავნის მცდელობის დრო
+                        try_sent_registration_datetime = datetime.datetime.now()
+                    # დაყოვნება
+                    time.sleep(delay)
+
+                # რეგისტრაციის მოთხოვნის გაგზავნის დრო
+                sent_registration_datetime = datetime.datetime.now()
+
+            # შევამოწმოთ თუ სერვერთან რეგისტრაციის შეტყობინების გაგზავნიდან გავიდა test_ies_monitoring_server_connection_delay წამი
+            if (datetime.datetime.now() - sent_registration_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
+                # შეტყობინება რეგისტრაციაზე არ გაგზავნილა
+                registration_message_sent = False
+            # დაყოვნება
+            time.sleep(delay)
+
+    def send_message_to_ies_monitoring_server(self, message):
+        """ ფუნქციიის საშუალებით შეიძლება შეტყობინების გაგზავნა ies_monitoring_server-თან """
+
         # სოკეტის შექმნა
-        ies_monitoring_server_connection = self.connect_ies_monitoring_server()
+        ies_monitoring_server_connection = self.connect_ies_monitoring_server(verbose=False)
 
         # ies_monitor-თან დაკავშირება
         if ies_monitoring_server_connection is False:
@@ -220,9 +349,8 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             # შეტყობინების გაგზავნა
             ies_monitoring_server_connection.send(self.dictionary_to_bytes(message))
-            if write_to_log:
-                logger.info("შეტყობინება გაიგზავნა ies_monitoring_server-თან\n{}"
-                            .format(message))
+            logger.debug("შეტყობინება გაიგზავნა ies_monitoring_server-თან\n{}"
+                         .format(message))
         except Exception as ex:
             logger.warning("შეტყობინება ვერ გაიგზავნა ies_monitoring_server-თან\n{}\n{}"
                            .format(message, str(ex)))
@@ -230,7 +358,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # სოკეტის დახურვა
         self.connection_close(ies_monitoring_server_connection, ies_monitoring_server_connection.getsockname())
 
-    def testing_connection_to_ies_monitoring_server(self):
+    def testing_connection_to_ies_monitoring_server(self):  # ???
+        """ ფუნქცია უგზავნის Hello პაკეტებს ies_monitoring_server -ს რითაც მოწმდება კავშირის არსებობა """
+
         # Hello პაკეტის შექმნა
         server_message = {
             "who_am_i": "ies_monitor",
@@ -239,35 +369,52 @@ class MainWindow(QtWidgets.QMainWindow):
             "port": ies_monitor_port
         }
 
+        # Hello პაკეტის გაგზავნა
+        self.send_message_to_ies_monitoring_server(server_message)
+
+        # შევინახოთ Hello პაკეტის გაგზავნის დრო
+        sent_datetime = datetime.datetime.now()
+
+        # პაკეტის გაგზავნის დროს ითვლება რომ კავშირი არ გვაქვს სერვერთან
+        self.connection_state = TESTING
+
         # ციკლი რომელიც მუდმივად აგზავნის Hello პაკეტებს
-        while True:
-            # შევამოწმოთ დავხუროთ თუ არა თრედი
-            if self.application_is_closing:
-                # ციკლიდან გამოსვლა. ამ შემთხვევაში თრედის დახურვა
-                break
-            # დაყოვნება Hello პაკეტებს შორის გაგზავნის შორის ინტერვალისთვის
-            time.sleep(test_ies_monitoring_server_connection_delay)
+        while True and self.application_is_closing is False:
+            if (datetime.datetime.now() - sent_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
+                # Hello პაკეტის გაგზავნა
+                self.send_message_to_ies_monitoring_server(server_message)
 
-            # Hello პაკეტის გაგზავნა
-            self.send_message_to_ies_monitor(server_message, False)
+                # შევინახოთ Hello პაკეტის გაგზავნის დრო
+                sent_datetime = datetime.datetime.now()
 
-            # შევინახოთ Hello პაკეტის გაგზავნის დრო
-            sent_datetime = datetime.datetime.now()
-
-            # პაკეტის გაგზავნის დროს ითვლება რომ კავშირი არ გვაქვს სერვერთან
-            self.connection_state = False
+                # პაკეტის გაგზავნის დროს ითვლება რომ კავშირი არ გვაქვს სერვერთან
+                self.connection_state = TESTING
 
             # ციკლი რომელიც ელოდება სერვერიდან Hello პაკეტის მიღებას
-            while self.connection_state is False:
+            while self.connection_state is TESTING:
                 # ციკლის სტაბილური მუშაობისთვის
-                time.sleep(0.1)
+                time.sleep(delay)
 
                 # შევამოწმოთ რა დრო გავიდა Hello პაკეტის გაგზავნის შემდეგ
                 if (datetime.datetime.now() - sent_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay * 2):
+                    self.connection_state = DISCONNECTED
                     logger.warning("სერვერთან კავშირი გაწყდა")
+                    self.register_to_ies_monitoring_server()
                     return
 
+            # ციკლის სტაბილური მუშაობისთვის
+            time.sleep(delay)
+
     def response_ies_monitoring_server(self, message, addr):
+        """
+            ფუნქცია განასხვავებს ies_monitoring_server -ისგან მიღებულ შეტყობინებებს
+            1. თუ მოსულია registration_verified შეტყობინება მაშინ ies_monitoring_server -თან კავშირის სტატუსი ხდება "CONNECTED" და
+               ეშვება testing_connection_to_ies_monitoring_server თრედი
+            2. თუ მოსულია database_updated შეტყობინება ეს ნიშნავს, რომ ies_monitoring_server -ის მონაცემთა ბაზაში
+               დაემატა ახალი შეტყობინება და შესაბამისად უნდა მოხდეს მონაცემების ხელახალი წამოღება
+            3. თუ მოსულია hello პაკეტი მაშინ ies_monitoring_server -თან კავშირის სტატუსი ხდება "CONNECTED"
+        """
+
         # შევამოწმოთ message dictionary-ის თუ აქვს message_category ინდექსი
         if "message_category" not in message:
             logger.warning("response_ies_monitoring_server ფუნქციას მიეწოდა message dictionary \
@@ -277,11 +424,15 @@ class MainWindow(QtWidgets.QMainWindow):
         # შევამოწმოთ მესიჯის კატეგორია
         if message["message_category"] == "registration_verified":
             logger.info("ies_monitor-ი წარმატებით დარეგისტრირდა ies_monitoring_server-ზე")
+            self.registration_verified = True
+            self.connection_state = CONNECTED
 
             # ეშვება თრედი რომელიც მუდმივად ამოწმებს სერვერთან კავშირს
             threading.Thread(target=self.testing_connection_to_ies_monitoring_server).start()
 
         elif message["message_category"] == "database_updated":
+            logger.info("სერვერიდან მოვიდა შეტყობინება იმის შესახებ, რომ მის მონაცემთა ბაზაში დაემატა ახალი შეტყობინება")
+
             self.load_messages_from_mysql()
 
             # ვიძახებთ connect_to_sqlite ფუნქციას
@@ -291,17 +442,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_opened_messages()
 
         elif message["message_category"] == "hello":
-            self.connection_state = True
+            self.connection_state = CONNECTED
             logger.debug("სერვერიდან მოვიდა hello შეტყობინება იმის დასტურად რომ სერვერი ხელმისაწვდომია")
 
     def server_message_handler_thread(self, connection, addr):
-        while True:
-            # შევამოწმოთ დავხუროთ თუ არა თრედი
-            if self.application_is_closing:
-                # ციკლიდან გამოსვლა. ამ შემთხვევაში თრედის დახურვა
-                break
-            # ციკლის შეჩერება 0.5 წამით
-            time.sleep(0.5)  # ??? 0.5 დრო აროს დასაზუსტებელი
+        """ ფუნქცია ამუშავებს მიღებულ შეტყობინებებს წასაკითხად და განასხვავებს გამომგზავნს """
+
+        while True and self.application_is_closing is False:
+            # დაყოვნება
+            time.sleep(delay)
 
             # select.select ფუნქცია აბრუნებს readers list-ში ისეთ socket-ებს რომელშიც მოსულია წასაკითხი ინფორმაცია
             # ბოლო პარამეტრად მითითებული გვაქვს 0 რადგან ფუნქცია არ დაელოდოს ისეთ სოკეტს რომელზეც შეიძლება წაკითხვა
@@ -336,27 +485,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def listening_to_ies_monitoring_server(self):
         """ ფუნქცია ხსნის პორტს და იწყებს მოსმენას """
 
-        # socket - ებიექტის შექმნა
-        listener_socket = socket.socket()
-
         # ვუთითებთ სოკეტის პარამეტრებს
-        listener_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
         # მოსმენის დაწყება
-        listener_socket.bind((ies_monitor_ip, ies_monitor_port))
+        self.listener_socket.bind((ies_monitor_ip, ies_monitor_port))
 
         # ვუთითებთ მაქსიმალურ კლიენტების რაოდენობას ვინც ელოდება კავშირის დამყარებაზე თანხმობას
-        listener_socket.listen(10)
+        self.listener_socket.listen(10)
 
         logger.debug("ies_monitor-ი მზად არის შეტყობინების მისაღებად")
 
-        while True:
+        while self.application_is_closing is False:
             try:
                 # თუ client-ი მზად არის კავშირის დასამყარებლად დავეთანხმოთ
-                connection, addr = listener_socket.accept()
+                connection, addr = self.listener_socket.accept()
 
                 # გამოაქვს დაკავშირებული კლიენტის მისამართი
-                logger.debug("კავშირი დამყარდა " + str(addr) + " - თან")
+                logger.debug("შეტყობინების გამოსაგზავნად დაგვიკავშირდა: " + str(addr))
 
                 # თითოეულ დაკავშირებულ client-ისთვის შევქმნათ და გავუშვათ
                 # ცალკე thread-ი client_handler_thread ფუნქციის საშუალებით
@@ -364,30 +510,23 @@ class MainWindow(QtWidgets.QMainWindow):
             except socket.error:
                 break
             except Exception as ex:
-                logger.error("შეცდომა accept_connections Thread-ში:\n" + str(ex))
+                logger.error("შეცდომა listening_to_ies_monitoring_server Thread-ში:\n" + str(ex))
                 break
-            # ??? thread-ი უნდა დაიხუროს პროგრამის გათიშვისას!!!
 
-    def register_to_ies_monitoring_server(self):
+    def send_registration_request_to_ies_monitoring_server(self):
         """ მიმდინარე ies_monitor-ის რეგისტრაცია ies_monitoring_server-ზე ხდება ip-ს და პორტის
             გაგზავნით. რეგისტრაციის მერე ies_monitoring_server-ი შეგვატყოვინებს ყველა ახალ
             შეტყობინებას """
 
         # ies_monitoring_server-თან დაკავშირება
-        connection = self.connect_ies_monitoring_server()
+        connection = self.connect_ies_monitoring_server(verbose=False)
 
         # შევამოწმოთ სერვერთან კავშირი თუ დამყარდა
         if connection is False:
+            logger.warning("რეგისტრაციის პაკეტის გასაგზავნად სერვერთან კავშირი ვერ დამყარდა")
             return False
 
-        global ies_monitor_ip
-
-        # მიმდინარე ies_monitor
-        ies_monitor_ip = connection.getsockname()[0]
-
-        # სერვერის მოსმენის დაწყება
-        threading.Thread(target=self.listening_to_ies_monitoring_server).start()
-
+        logger.debug("სერვერთან კავშირი დამყარდა რეგისტრაციის პაკეტის გასაგზავნად")
         # სერვერთან გასაგზავნი შეტყობინება
         server_message = {
             "who_am_i": "ies_monitor",
@@ -405,7 +544,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         return True
-
 
     def check_opened_messages(self):
         """ ვამოწმებთ წაკითხული შეტყობინებების ბაზას და ვუცვლით ფერს
@@ -453,7 +591,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             self.conn.commit()
 
-        # self.sqlite_cursor.close()
+        # self.sqlite_cursor.close()  # ???
         # self.conn.close()
 
     def connect_to_mysql(self):
@@ -495,9 +633,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def load_messages_from_mysql(self):
         """ mysql ბაზიდან კითხულობს შეტყობინებებს და სვავს message_table -ის შესაბამის სტრიქონში """
 
-        # წაკითხული შეტყობინებები
-        # global message_data
-
         query = "SELECT " + ", ".join(self.mysql_table_col_names) + " FROM messages"
         self.cursor.execute(query)
         self.message_data = self.cursor.fetchall()
@@ -510,7 +645,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                            QtWidgets.QTableWidgetItem(str(row[col_name])))
 
     def message_table_double_click(self):
-        """ ფუნქცია გამოიძახება სტრიქონზე მაუსის ორჯერ დაჭერისას.
+        """
+            ფუნქცია გამოიძახება სტრიქონზე მაუსის ორჯერ დაჭერისას.
             იძახებს dialog ფანჯარას და ავსებს მონიშნული შეტყობინების მონაცემებით,
             მონიშნული შეტყობინების ID -ს წერს წაკითხული შეტყობინებების ბაზაში (sqlite),
             უცვლის წაკითხულ შეტყობინებას ფერს.
@@ -555,8 +691,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.script_name.setText(self.load_message['client_script_name'])
         self.ui.text.setPlainText(self.load_message['text'])
 
-    # ფუნქცია გამოიძახება პროგრამის დახურვის დროს
     def closeEvent(self, event):
+        """ ფუნქცია გამოიძახება პროგრამის დახურვის დროს """
+
         close = QtWidgets.QMessageBox.question(
             self,
             "QUIT",
@@ -565,8 +702,9 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
         if close == QtWidgets.QMessageBox.Yes:
-            event.accept()
             self.application_is_closing = True
+            self.connection_close(self.listener_socket)
+            event.accept()
         else:
             event.ignore()
 
