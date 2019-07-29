@@ -5,12 +5,13 @@
 """ შენიშნები
 1. mysql -დან მონაცემების წამოღება ხდება პირდაპირი კავშირით . მოსაფიქრებელია ალტერნატიული გზა
 2. Segmentation fault (core dumped) ზოგჯერ წერს , სანახავია მიზეზი!!!
+3. send_registration_request_to_ies_monitoring_server ფუნქციაში გამოვიყენოთ send_message_to_ies_monitoring_server ++
 """
 import sys
 import pymysql  # 0.9.3
 import sqlite3
 import socket
-import json
+import pickle
 import time
 import threading
 import os
@@ -37,7 +38,7 @@ log_filename = "log"
 test_ies_monitoring_server_connection_delay = 5
 
 # ies_monitoring_server-ის ip-ი მისამართი
-ies_monitoring_server_ip = "10.0.0.153"
+ies_monitoring_server_ip = "10.0.0.177"
 
 # ies_monitoring_server-ის პორტი
 ies_monitoring_server_port = 12345
@@ -58,10 +59,19 @@ mysql_database_name = "ies_monitoring_server"
 mysql_server_port = 3306
 
 # მესიჯის buffer_size
-buffer_size = 2048
+buffer_size = 1036288  # 873114
 
 # დაყოვნება პროგრამის ისეთ ციკლებში სადაც საჭიროა/რეკომენდირებულია შენელებული მუშაობა
 delay = 0.1
+
+# ლოდინის დრო, თუ რამდენხანს დაველოდებით შეტყობინების მიღებას კავშირის დამყარების შემდეგ
+waiting_message_timeout = 60
+
+# ლოდინის დრო, თუ რამდენხანს დაველოდებით შეტყობინების შემდეგი ნაწილის (ბაიტების) მიღებას
+next_message_bytes_timeout = 30
+
+# დროის ინტერვალი თუ რამდენ წამში ერთხელ ვცადოთ სერვერზე რეგისტრაცია
+registration_retry_time_interval = 15
 
 
 # -------------------------------------------------------------------------------------------------
@@ -74,6 +84,9 @@ DISCONNECTED = 0
 CONNECTED = 1
 # სერვერთან კავშირის შემოწმება
 TESTING = 2
+
+# მესიჯის ჰედერის სიგრძე
+HEADERSIZE = 10
 
 
 class ConsoleFormatter(logging.Formatter):
@@ -148,8 +161,11 @@ class MainWindow(QtWidgets.QMainWindow):
         # socket - ობიექტის შექმნა
         self.listener_socket = socket.socket()
 
+        # ბოლო მიღებული მესიჯის კატეგორია
+        self.last_received_message_category = None
+
         reconnect = QtWidgets.QAction("&Reconnect", self)
-        reconnect.triggered.connect(lambda: self.send_registration_request_to_ies_monitoring_server(start_listening_thread=False))
+        reconnect.triggered.connect(lambda: self.send_registration_request_to_ies_monitoring_server())
 
         menu_bar = self.menuBar()
         connect_menu = menu_bar.addMenu('&Connection')
@@ -237,17 +253,6 @@ class MainWindow(QtWidgets.QMainWindow):
         connection.shutdown(socket.SHUT_RDWR)
         connection.close()
 
-    def dictionary_to_bytes(self, dictionary_message):
-        """ dictionary ტიპის ობიექტი გადაყავს bytes ტიპში
-        რადგან socket ობიექტის გამოყენებით მონაცემები იგზავნება bytes ტიპში
-        მოსახერხებელია რომ გვქონდეს ფუნქციები რომელიც dictionary-ის გადაიყვანს
-        bytes ტიპში და პირიქით """
-        return bytes(json.dumps(dictionary_message), 'utf-8')
-
-    def bytes_to_dictionary(self, json_text):
-        """ json ტექსტს აკონვერტირებს dictionary ტიპში """
-        return json.loads(json_text.decode("utf-8"))
-
     def communicate_to_ies_monitoring_server_thread(self):
         """
             ფუნქცია ამოწმებს სერვერთან კავშირს, კავშირის დამყარების შემთხვევაში ვგებულობთ მიმდინარე
@@ -294,69 +299,114 @@ class MainWindow(QtWidgets.QMainWindow):
     def register_to_ies_monitoring_server(self):
         """ ფუნქცია აგზავნის რეგისტრაციის მოთხოვნას ies_monitoring_server -თან და ელოდება მისგან დასტურს """
 
-        # შეტყობინება რეგისტრაციაზე არ გაგზავნილა
-        registration_message_sent = False
+        # სერვერთან გასაგზავნი შეტყობინება
+        server_message = {
+            "who_am_i": "ies_monitor",
+            "message_category": "registration",
+            "ip": ies_monitor_ip,
+            "port": ies_monitor_port
+        }
 
-        self.registration_verified = False
+        # რეგისტრაციის მოთხოვნის გაგზავნა
+        registration_message_sent = self.send_registration_request_to_ies_monitoring_server(server_message)
+        # რეგისტრაციის მოთხოვნის გაგზავნის მცდელობის დრო
+        try_sent_registration_datetime = datetime.datetime.now()
 
-        # ციკლი სერვერთან რეგისტრაციის დასადასტურებლად
-        # ციკლიდან გამოვდივართ იმ შემთხვევაში თუ სერვერიდან მივიღეთ რეგისტრაციის მოთხოვნაზე დასტური
+        # ციკლი სერვერთან რეგისტრაციის შეტყობინების გასაგზავნად
+        # ციკლიდან გამოვდივართ იმ შემთხვევაში თუ რეგისრაციის შეტყობინება გაიგზავნა
         # ან თუ პროგრამა იხურება
-        while self.registration_verified is False and self.application_is_closing is False:
-            # თუ შეტყობინება არ გაგზავნილა რეგისტრაციის მოთხოვნისთვის
-            if registration_message_sent is False:
+        while registration_message_sent is False and self.application_is_closing is False:
+            # შევამოწმოთ თუ სერვერთან რეგისტრაციის შეტყობინების გაგზავნის ცდიდან გავიდა test_ies_monitoring_server_connection_delay წამი
+            if (datetime.datetime.now() - try_sent_registration_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
                 # რეგისტრაციის მოთხოვნის გაგზავნა
-                registration_message_sent = self.send_registration_request_to_ies_monitoring_server()
+                registration_message_sent = self.send_registration_request_to_ies_monitoring_server(server_message)
+                if registration_message_sent is True:
+                    # ფუნქცია ელოდება registration_verified კატეგორიის შეტყობინების მოსვლას
+                    self.wait_for_ies_monitoring_server_response("registration_verified", registration_retry_time_interval, server_message, self.register_to_ies_monitoring_server)
+
+                    # ფუნქცია ამთავრებს მუშაობას თუ სერვერიდან დაბრუნდა რეგისტრაციაზე მოთხოვნის პასუხი
+                    return
                 # რეგისტრაციის მოთხოვნის გაგზავნის მცდელობის დრო
                 try_sent_registration_datetime = datetime.datetime.now()
-
-                # ციკლი სერვერთან რეგისტრაციის შეტყობინების გასაგზავნად
-                # ციკლიდან გამოვდივართ იმ შემთხვევაში თუ რეგისრაციის შეტყობინება გაიგზავნა
-                # ან თუ პროგრამა იხურება
-                while registration_message_sent is False and self.application_is_closing is False:
-                    # შევამოწმოთ თუ სერვერთან რეგისტრაციის შეტყობინების გაგზავნის ცდიდან გავიდა test_ies_monitoring_server_connection_delay წამი
-                    if (datetime.datetime.now() - try_sent_registration_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
-                        # რეგისტრაციის მოთხოვნის გაგზავნა
-                        registration_message_sent = self.send_registration_request_to_ies_monitoring_server()
-
-                        # რეგისტრაციის მოთხოვნის გაგზავნის მცდელობის დრო
-                        try_sent_registration_datetime = datetime.datetime.now()
-                    # დაყოვნება
-                    time.sleep(delay)
-
-                # რეგისტრაციის მოთხოვნის გაგზავნის დრო
-                sent_registration_datetime = datetime.datetime.now()
-
-            # შევამოწმოთ თუ სერვერთან რეგისტრაციის შეტყობინების გაგზავნიდან გავიდა test_ies_monitoring_server_connection_delay წამი
-            if (datetime.datetime.now() - sent_registration_datetime) > datetime.timedelta(seconds=test_ies_monitoring_server_connection_delay):
-                # შეტყობინება რეგისტრაციაზე არ გაგზავნილა
-                registration_message_sent = False
             # დაყოვნება
             time.sleep(delay)
+
+        # ფუნქცია ელოდება registration_verified კატეგორიის შეტყობინების მოსვლას
+        self.wait_for_ies_monitoring_server_response("registration_verified", registration_retry_time_interval, server_message, self.register_to_ies_monitoring_server)
 
     def send_message_to_ies_monitoring_server(self, message):
         """ ფუნქციიის საშუალებით შეიძლება შეტყობინების გაგზავნა ies_monitoring_server-თან """
 
-        # სოკეტის შექმნა
+        # ies_monitoring_server-თან დაკავშირება
         ies_monitoring_server_connection = self.connect_ies_monitoring_server(verbose=False)
 
-        # ies_monitor-თან დაკავშირება
+        # ies_monitoring_server-თან კავშირის შემოწმება
         if ies_monitoring_server_connection is False:
             logger.warning("შეტყობინება ვერ გაიგზავნა, ies_monitoring_server-თან კავშირი ვერ დამყარდა\n{}"
                            .format(message))
-            return
+            # ფუნქცია აბრუნებს False -ს ნიშნად იმისა რომ მესიჯი ვერ გაიგზავნა სერვერზე
+            return False
 
         try:
             # შეტყობინების გაგზავნა
-            ies_monitoring_server_connection.send(self.dictionary_to_bytes(message))
+            ies_monitoring_server_connection.send(self.dictionary_message_to_bytes(message))
             logger.debug("შეტყობინება გაიგზავნა ies_monitoring_server-თან\n{}"
                          .format(message))
         except Exception as ex:
             logger.warning("შეტყობინება ვერ გაიგზავნა ies_monitoring_server-თან\n{}\n{}"
                            .format(message, str(ex)))
 
+            # ფუნქცია აბრუნებს False -ს ნიშნად იმისა რომ მესიჯი ვერ გაიგზავნა სერვერზე
+            return False
+
         # სოკეტის დახურვა
         self.connection_close(ies_monitoring_server_connection, ies_monitoring_server_connection.getsockname())
+
+        # ფუნქცია აბრუნებს True -ს ნიშნად იმისა რომ მესიჯი წარმატებით გაიგზავნა სერვერზე
+        return True
+
+    def send_database_pull_request_to_ies_monitoring_server(self):
+        """ ფუნქციის საშუალებით ies_monitoring_server-ს ეგზავნება მონაცემთა ბაზის გამოგზავნის მოთხოვნა """
+
+        # database_pull_request პაკეტის შექმნა
+        server_message = {
+            "who_am_i": "ies_monitor",
+            "message_category": "database_pull_request",
+            "ip": ies_monitor_ip,
+            "port": ies_monitor_port,
+            "last_message_id": 0
+        }
+
+        # database_pull_request პაკეტის გაგზავნა
+        self.send_message_to_ies_monitoring_server(server_message)
+
+        # ფუნქცია ელოდება message_data კატეგორიის შეტყობინების მოსვლას
+        self.wait_for_ies_monitoring_server_response("message_data", 10, server_message)
+
+    def wait_for_ies_monitoring_server_response(self, message_category, wait_time, message, function_name=None, args=()):
+        """
+            ფუნქციის საშუალებით ვაკვირდებით გაგზავნილი შეტყობინების პასუხს
+            message_category - პარამეტრით ეთითება მესიჯის კატეგორია რომელსაც ველოდებით სერვერისგან პასუხად
+            wait_time - პარამეტრით ეთითება დრო წამებში თუ რა დროის მანძილზე ველოდებით სერვერისგან პასუხს. იმ
+                        შემთხვევაში თუ მითითებული დროის განმავლობაში სერვერიდან არ მოვიდა პასუხი, ფუნქცია თვლის რომ
+                        სერვერს არ მიუღია გაგზავნილი შეტყობინება
+        """
+
+        # მესიჯის გაგზავნის დრო
+        message_sent_time = datetime.datetime.now()
+
+        # მუდმივი ციკლის საშუალებით ველოდებით გაგზავნილ შეტყობინებაზე პასუხს
+        while self.last_received_message_category != message_category and self.application_is_closing is False:
+            # შევამოწმოთ რა დრო გავიდა გაგზავნილი შეტყობინების შემდეგ
+            if (datetime.datetime.now() - message_sent_time) > datetime.timedelta(seconds=wait_time):
+                logger.warning("სერვერიდან არ მოვიდა პასუხი შეტყობინებაზე: \n{}".format(message))
+                if function_name is not None:
+                    function_name(*args)
+                # ციკლის დასრულება
+                break
+            # დაყოვნება
+            time.sleep(delay)
+        logger.debug("სერვერიდან მოვიდა პასუხი შეტყობინებაზე: \n{}".format(message))
 
     def testing_connection_to_ies_monitoring_server(self):  # ???
         """ ფუნქცია უგზავნის Hello პაკეტებს ies_monitoring_server -ს რითაც მოწმდება კავშირის არსებობა """
@@ -426,9 +476,11 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.info("ies_monitor-ი წარმატებით დარეგისტრირდა ies_monitoring_server-ზე")
             self.registration_verified = True
             self.connection_state = CONNECTED
+            self.last_received_message_category = message["message_category"]
 
             # ეშვება თრედი რომელიც მუდმივად ამოწმებს სერვერთან კავშირს
             threading.Thread(target=self.testing_connection_to_ies_monitoring_server).start()
+            threading.Thread(target=self.send_database_pull_request_to_ies_monitoring_server).start()
 
         elif message["message_category"] == "database_updated":
             logger.info("სერვერიდან მოვიდა შეტყობინება იმის შესახებ, რომ მის მონაცემთა ბაზაში დაემატა ახალი შეტყობინება")
@@ -445,12 +497,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.connection_state = CONNECTED
             logger.debug("სერვერიდან მოვიდა hello შეტყობინება იმის დასტურად რომ სერვერი ხელმისაწვდომია")
 
+        elif message["message_category"] == "message_data":
+            # ვინახავთ ბოლოს მიღებული შეტყობინების კატეგორიას
+            self.last_received_message_category = message["message_category"]
+
     def server_message_handler_thread(self, connection, addr):
         """ ფუნქცია ამუშავებს მიღებულ შეტყობინებებს წასაკითხად და განასხვავებს გამომგზავნს """
 
-        while True and self.application_is_closing is False:
-            # დაყოვნება
+        receiving_message_time_duraction = datetime.datetime.now()
+
+        while self.application_is_closing is False:
+
+            # ციკლის შეჩერება 0.1 წამით
             time.sleep(delay)
+
+            if (datetime.datetime.now() - receiving_message_time_duraction) > datetime.timedelta(seconds=waiting_message_timeout):
+                #  ლოგია ჩასამატებელი???
+
+                # კავშირის დახურვა
+                self.connection_close(connection, addr)
+
+                # ფუნქციიდან გამოსვლა
+                return
 
             # select.select ფუნქცია აბრუნებს readers list-ში ისეთ socket-ებს რომელშიც მოსულია წასაკითხი ინფორმაცია
             # ბოლო პარამეტრად მითითებული გვაქვს 0 რადგან ფუნქცია არ დაელოდოს ისეთ სოკეტს რომელზეც შეიძლება წაკითხვა
@@ -459,28 +527,121 @@ class MainWindow(QtWidgets.QMainWindow):
             # შევამოწმოთ readers list-ი თუ არ არის ცარიელი, რაც ამ შემთხვევაში ნიშნავს იმას რომ connection
             # socket-ზე მოსულია წასაკითხი ინფორმაცია
             if readers:
-                # წავიკითხოთ client-სგან გამოგზავნილი შეტყობინება
-                json_message = connection.recv(buffer_size)
+                # ცვლადი სადაც ვინახავთ მესიჯის ჰედერს და თვითონ მესიჯს
+                header_and_message = b''
 
-                # იმ შემთხვევაში თუ კავშირი გაწყდა json_message იქნბა ცარიელი
-                if not json_message.decode("utf-8"):
-                    self.connection_close(connection, addr)
-                    # ციკლიდან გამოსვლა. ამ შემთხვევაში თრედის დახურვა
+                # ახალი მესიჯი
+                new_message = True
+
+                # მესიჯის მოსვლის დრო
+                message_receive_time = datetime.datetime.now()
+
+                # მუდმივი ციკლი მესიჯის წასაკითხათ
+                while self.application_is_closing is False:
+                    # დაყოვნება
+                    time.sleep(delay)
+
+                    if (datetime.datetime.now() - message_receive_time) > datetime.timedelta(seconds=next_message_bytes_timeout):
+                        # კავშირის დახურვა
+                        self.connection_close(connection, addr)
+
+                        # logger ის გამოძახება
+                        # logger.warning("{} გამოგზავნილი მესიჯი არ მოვიდა სრულად. გამოგზავნილი მესიჯის ბაიტების რაოდენობა: {}."
+                        #                "მიღებული მესიჯის ბაიტების რაოდენობა: {}."
+                        #                " მიღებული მესიჯის ნაწილი:\n{}"
+                        #                .format(str(addr), message_length, received_message_length, header_and_message.decode("utf-8")))
+
+                        # ფუნქციიდან გამოსვლა
+                        return
+
+                    readers, _, _, = select.select([connection], [], [], 0)
+
+                    # შევამოწმოთ readers list-ი თუ არ არის ცარიელი, რაც ამ შემთხვევაში ნიშნავს იმას რომ connection
+                    # socket-ზე მოსულია წასაკითხი ინფორმაცია
+                    if readers:
+                        # ახალი მესიჯი
+                        # new_message = True
+
+                        # წავიკითხოთ გამოგზავნილი მესიჯის ან მესიჯის ნაწილი
+                        message_bytes = connection.recv(buffer_size)
+
+                        # იმ შემთხვევაში თუ კავშირი გაწყდა message_bytes იქნება ცარიელი
+                        if not message_bytes:
+                            # კავშირის დახურვა
+                            self.connection_close(connection)
+
+                            # ფუნქციიდან გამოსვლა
+                            return
+
+                        # მესიჯის მიღების დრო
+                        message_receive_time = datetime.datetime.now()
+
+                        # თუ მესიჯის წაკითხვა დაიწყო
+                        if new_message is True:
+
+                            # მესიჯის სიგრძის/ჰედერის წაკითხვა.
+                            message_length = int(message_bytes[:HEADERSIZE])
+
+                            # მესიჯის ჰედერის წაკითხვის დასასრული
+                            new_message = False
+
+                        # მესიჯის შეგროვება
+                        header_and_message += message_bytes
+
+                        # დავთვალოთ წაკითხული მესიჯის სიგრძე ჰედერის გარეშე
+                        received_message_length = len(header_and_message) - HEADERSIZE
+
+                        # შევამოწმოთ თუ წავიკითხეთ მთლიანი მესიჯი
+                        if received_message_length == message_length:
+                            try:
+                                # მესიჯის აღდგენა, bytes-ს ტიპიდან dictionary ობიექტში გადაყვანა
+                                message = pickle.loads(header_and_message[HEADERSIZE:])
+                            except Exception as ex:
+                                # logger -ის გამოძახება
+                                logger.warning("მიღებული მესიჯის bytes-ს ტიპიდან dictionary ობიექტში გადაყვანისას დაფიქსირდა შეცდომა: \n{}".format(str(ex)))
+
+                                # კავშირის დახურვა
+                                self.connection_close(connection, addr)
+                                # ფუნქციიდან გამოსვლა
+                                return
+
+                            # ციკლიდან გამოსვლა
+                            break
+                        elif received_message_length > message_length:
+                            try:
+                                # მესიჯის აღდგენა, bytes-ს ტიპიდან dictionary ობიექტში გადაყვანა
+                                message = pickle.loads(header_and_message[HEADERSIZE:])
+                            except Exception as ex:
+                                # logger -ის გამოძახება
+                                logger.warning("მოსული მესიჯის სიგრძემ გადააჭარბა ჰედერში მითითებულ მოსალოდნელ სიგრძეს")
+
+                                # logger -ის გამოძახება
+                                logger.warning("მიღებული მესიჯის bytes-ს ტიპიდან dictionary ობიექტში გადაყვანისას დაფიქსირდა შეცდომა: \n{}"
+                                               .format(str(ex)))
+
+                                # კავშირის დახურვა
+                                self.connection_close(connection, addr)
+                                # ფუნქციიდან გამოსვლა
+                                return
+
+                            # logger -ის გამოძახება
+                            logger.warning("მოსული მესიჯის სიგრძემ გადააჭარბა ჰედერში მითითებულ მოსალოდნელ სიგრძეს. მესიჯი: \n{}".format(message))
+
+                            # კავშირის დახურვა
+                            self.connection_close(connection, addr)
+                            # ფუნქციიდან გამოსვლა
+                            return
+
+                # შევამოწმოთ თუ message dictionary-ის არ აქვს who_am_i key-ი
+                if "who_am_i" not in message:
+                    logger.warning("მოსულია ისეთი შეტყობინება რომელსაც არ აქვს who_am_i key-ი")
+                    # თუ არ გვაქვს who_am_i key-ი ესეიგი მოსულია საეჭვო მესიჯი და ვხურავთ თრედს
                     break
-                else:
-                    # წაკითხული შეტყობინება bytes ობიექტიდან გადავიყვანოთ dictionary ობიექტში
-                    message = self.bytes_to_dictionary(json_message)
 
-                    # შევამოწმოთ თუ message dictionary-ის არ აქვს who_am_i key-ი
-                    if "who_am_i" not in message:
-                        logger.warning("მოსულია ისეთი შეტყობინება რომელსაც არ აქვს who_am_i key-ი")
-                        # თუ არ გვაქვს who_am_i key-ი ესეიგი მოსულია საეჭვო მესიჯი და ვხურავთ თრედს
-                        break
-
-                    # შევამოწმოთ თუ შეტყობინება მოსულია ies_monitor.py - სგან
-                    elif message["who_am_i"] == "ies_monitoring_server":
-                        self.response_ies_monitoring_server(message, addr)
-                        break
+                # შევამოწმოთ თუ შეტყობინება მოსულია ies_monitor.py - სგან
+                elif message["who_am_i"] == "ies_monitoring_server":
+                    self.response_ies_monitoring_server(message, addr)
+                    break
 
     def listening_to_ies_monitoring_server(self):
         """ ფუნქცია ხსნის პორტს და იწყებს მოსმენას """
@@ -513,13 +674,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 logger.error("შეცდომა listening_to_ies_monitoring_server Thread-ში:\n" + str(ex))
                 break
 
-    def send_registration_request_to_ies_monitoring_server(self):
+    def dictionary_message_to_bytes(self, message):
+        """ ფუნქციას dictionary ტიპის მესიჯი გადაყავს bytes ტიპში და თავში უმატებს header-ს """
+
+        # dictionary გადადის bytes ტიპში (serialization)
+        message_bytes = pickle.dumps(message)
+
+        # მესიჯის სიგრძე დათვლა
+        message_length = len(message_bytes)
+
+        # header-ი გადავიყვანოთ ბაიტებში და დავუმატოთ გადაყვანილი მესიჯი byte-ებში
+        message_bytes = bytes(str(message_length).ljust(HEADERSIZE), 'utf-8') + message_bytes
+
+        # ფუნქცია აბრუნებს მესიჯს გადაყვანილს ბაიტებში თავისი header-ით
+        return message_bytes
+
+    def send_registration_request_to_ies_monitoring_server(self, message):
         """ მიმდინარე ies_monitor-ის რეგისტრაცია ies_monitoring_server-ზე ხდება ip-ს და პორტის
             გაგზავნით. რეგისტრაციის მერე ies_monitoring_server-ი შეგვატყოვინებს ყველა ახალ
             შეტყობინებას """
 
-        # ies_monitoring_server-თან დაკავშირება
-        connection = self.connect_ies_monitoring_server(verbose=False)
+        connection = self.connect_ies_monitoring_server()
 
         # შევამოწმოთ სერვერთან კავშირი თუ დამყარდა
         if connection is False:
@@ -527,23 +702,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         logger.debug("სერვერთან კავშირი დამყარდა რეგისტრაციის პაკეტის გასაგზავნად")
-        # სერვერთან გასაგზავნი შეტყობინება
-        server_message = {
-            "who_am_i": "ies_monitor",
-            "message_category": "registration",
-            "ip": ies_monitor_ip,
-            "port": ies_monitor_port
-        }
 
-        try:
-            # შეტყობინების გაგზავნა/რეგისტრაცია ies_monitoring_server-ზე
-            connection.send(self.dictionary_to_bytes(server_message))
-            logger.debug("სერვერზე გაიგზავნა რეგისტრაციის შეტყობინება")
-        except Exception as ex:
-            logger.error("შეცდომა ies_monitoring_server-ზე რეგისტრაციის დროს:\n" + str(ex))
-            return False
-
-        return True
+        # შეტყობინების გაგზავნა და ფუნქციის მნიშვნელობის დაბრუნება
+        return self.send_message_to_ies_monitoring_server(message)
 
     def check_opened_messages(self):
         """ ვამოწმებთ წაკითხული შეტყობინებების ბაზას და ვუცვლით ფერს
