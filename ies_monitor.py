@@ -7,6 +7,7 @@
 2. Segmentation fault (core dumped) ზოგჯერ წერს , სანახავია მიზეზი!!!
 3. send_registration_request_to_ies_monitoring_server ფუნქციაში გამოვიყენოთ send_message_to_ies_monitoring_server ++
 """
+
 import sys
 import pymysql  # 0.9.3
 import sqlite3
@@ -38,25 +39,10 @@ log_filename = "log"
 test_ies_monitoring_server_connection_delay = 5
 
 # ies_monitoring_server-ის ip-ი მისამართი
-ies_monitoring_server_ip = "10.0.0.177"
+ies_monitoring_server_ip = "10.0.0.194"
 
 # ies_monitoring_server-ის პორტი
 ies_monitoring_server_port = 12345
-
-# mysql-ის ip მისამართი
-mysql_server_ip = "localhost"
-
-# mysql სერვერის user-ი
-mysql_server_user = "root"
-
-# mysql-სერვერის user-ის პაროლი
-mysql_user_pass = "AcharuliXachapuri123!"
-
-# mysql-სერვერის მონაცემთა ბაზის სახელი
-mysql_database_name = "ies_monitoring_server"
-
-# mysql-სერვერის პორტი
-mysql_server_port = 3306
 
 # მესიჯის buffer_size
 buffer_size = 1036288  # 873114
@@ -177,21 +163,24 @@ class MainWindow(QtWidgets.QMainWindow):
         # main_window_close_action ხდომილების შემთხვევაში გამოვიძახოთ main_window_close_event ფუნქცია
         main_window_close_action.triggered.connect(self.closeEvent)
 
-        # message_table - ზე ორჯერ დაჭერით გამოვიძახოთ message_table_double_click
-        self.message_table.doubleClicked.connect(self.message_table_double_click)
-
         # ???
-        self.mysql_table_col_names = [
+        self.sqlite_table_col_names = [
             "message_id", "sent_message_datetime", "message_type",
             "message_title", "text", "client_ip", "client_script_name"
         ]
 
         # ???
-        self.mysql_table_col_readable_names = [
+        self.sqlite_table_col_readable_names = [
             "ID", "Time", "Message Type",
             "Message Title", "Message",
             "Client IP", "Script Name"
         ]
+
+        # ვიძახებთ load_messages_from_sqlite ფუნქციას
+        message_data = self.load_messages_from_sqlite()
+
+        # message_table - ზე ორჯერ დაჭერით გამოვიძახოთ message_table_double_click
+        self.message_table.doubleClicked.connect(lambda: self.message_table_double_click(message_data))
 
         # ეშვება update_connection_status ფუნქცია თრედად
         threading.Thread(target=self.update_connection_status).start()
@@ -202,17 +191,12 @@ class MainWindow(QtWidgets.QMainWindow):
         # ვიძახებთ set_qtablewidget_style ფუნქციას
         self.set_qtablewidget_style()
 
-        # ვიძახებთ connect_to_mysql ფუნქციას
-        self.connect_to_mysql()
-
-        # ვიძახებთ load_messages_from_mysql ფუნქციას
-        self.load_messages_from_mysql()
-
-        # ვიძახებთ connect_to_sqlite ფუნქციას
-        self.connect_to_sqlite()
+        # ვიძახებთ load_messages_in_ies_monitor ფუნქციას
+        self.load_messages_in_ies_monitor(message_data)  
 
         # ვიძახებთ check_opened_messages ფუნქციას
-        self.check_opened_messages()
+        # ??? უნდა იყოს თუ არა აქ
+        self.check_opened_messages(message_data)
 
     def update_connection_status(self):
         """ ფუნქცია სტატუს ბარში აჩვენებს ies_monitoring_server -თან კავშირის სტატუსს """
@@ -368,13 +352,36 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_database_pull_request_to_ies_monitoring_server(self):
         """ ფუნქციის საშუალებით ies_monitoring_server-ს ეგზავნება მონაცემთა ბაზის გამოგზავნის მოთხოვნა """
 
+        # sqlite-ის ბაზასთან დაკავშირება
+        sqlite_connection = self.connect_to_sqlite()
+
+        if sqlite_connection:
+            logger.debug("sqlite ბაზასთან დამყარდა კავშირი ბოლო შეტყობინების primary_id ის გასაგებად")
+        else:
+            logger.warning("ვერ დამყარდა კავშირი sqlite ბაზასთან ბოლო შეტყობინების primary_id ის გასაგებად")
+
+        # მონაცემების ლისტად წამოღება
+        sqlite_connection.row_factory = lambda cursor, row: row[0]
+
+        sqlite_cursor = sqlite_connection.cursor()
+
+        sqlite_cursor.execute(""" SELECT MAX("id") FROM "messages" """)
+
+        # sqlite ბაზაში არსებული ბოლო შეტყობინების primary_id
+        get_last_message_id = sqlite_cursor.fetchone()
+
+        print("++++++++++++++", get_last_message_id)
+
+        if get_last_message_id is None:
+            get_last_message_id = 0
+
         # database_pull_request პაკეტის შექმნა
         server_message = {
             "who_am_i": "ies_monitor",
             "message_category": "database_pull_request",
             "ip": ies_monitor_ip,
             "port": ies_monitor_port,
-            "last_message_id": 0
+            "last_message_id": get_last_message_id
         }
 
         # database_pull_request პაკეტის გაგზავნა
@@ -485,13 +492,16 @@ class MainWindow(QtWidgets.QMainWindow):
         elif message["message_category"] == "database_updated":
             logger.info("სერვერიდან მოვიდა შეტყობინება იმის შესახებ, რომ მის მონაცემთა ბაზაში დაემატა ახალი შეტყობინება")
 
-            self.load_messages_from_mysql()
+            self.write_messages_to_sqlite(message)
 
-            # ვიძახებთ connect_to_sqlite ფუნქციას
-            self.connect_to_sqlite()
+            message_data = self.load_messages_from_sqlite()
+
+            self.load_messages_in_ies_monitor(message_data)
+
+            # self.send_database_pull_request_to_ies_monitoring_server()
 
             # ვიძახებთ check_opened_messages ფუნქციას
-            self.check_opened_messages()
+            # self.check_opened_messages()
 
         elif message["message_category"] == "hello":
             self.connection_state = CONNECTED
@@ -500,6 +510,14 @@ class MainWindow(QtWidgets.QMainWindow):
         elif message["message_category"] == "message_data":
             # ვინახავთ ბოლოს მიღებული შეტყობინების კატეგორიას
             self.last_received_message_category = message["message_category"]
+
+            self.write_messages_to_sqlite(message)
+
+            message_data = self.load_messages_from_sqlite()
+
+            self.load_messages_in_ies_monitor(message_data)
+
+            self.check_opened_messages(message_data)
 
     def server_message_handler_thread(self, connection, addr):
         """ ფუნქცია ამუშავებს მიღებულ შეტყობინებებს წასაკითხად და განასხვავებს გამომგზავნს """
@@ -638,7 +656,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     # თუ არ გვაქვს who_am_i key-ი ესეიგი მოსულია საეჭვო მესიჯი და ვხურავთ თრედს
                     break
 
-                # შევამოწმოთ თუ შეტყობინება მოსულია ies_monitor.py - სგან
+                # შევამოწმოთ თუ შეტყობინება მოსულია ies_monitoring_server.py - სგან
                 elif message["who_am_i"] == "ies_monitoring_server":
                     self.response_ies_monitoring_server(message, addr)
                     break
@@ -706,72 +724,97 @@ class MainWindow(QtWidgets.QMainWindow):
         # შეტყობინების გაგზავნა და ფუნქციის მნიშვნელობის დაბრუნება
         return self.send_message_to_ies_monitoring_server(message)
 
-    def check_opened_messages(self):
+    def check_opened_messages(self, message_data):
         """ ვამოწმებთ წაკითხული შეტყობინებების ბაზას და ვუცვლით ფერს
            შესაბამის შეტყობინებას, პროგრამის გახსნისას """
 
-        self.select_message_id_sqlite()
+        select_opened_column = """SELECT "message_id", "opened" FROM "messages" WHERE "opened" = 1"""
+
+        # sqlite-ის ბაზასთან დაკავშირება
+        sqlite_connection = self.connect_to_sqlite()
+        if sqlite_connection:
+            logger.debug("sqlite ბაზასთან დამყარდა კავშირი წაკითხული შეტყობინებების შესამოწმებლად")
+        else:
+            logger.warning("ვერ დამყარდა კავშირი sqlite ბაზასთან წაკითხული შეტყობინებების შესამოწმებლად")
+        sqlite_cursor = sqlite_connection.cursor()
+        sqlite_cursor.execute(select_opened_column)
+        opened_message_id = sqlite_cursor.fetchall()
+        sqlite_connection.commit()
+        print("opened_message_id= ", opened_message_id)
 
         # ვამოწმებთ არის თუ არა შეტყობინების ID წაკითხული შეტყობინებების ბაზაში,
         # არსებობის შემთხვევაში შეტყობინებას ეცვლება ფონტი
-        for row_index, row in enumerate(self.message_data):
-            for col_index, col_name in enumerate(self.mysql_table_col_names):
-                if row['message_id'] in self.get_id:
-                    font = QtGui.QFont()
-                    font.setBold(False)
-                    self.message_table.item(row_index, col_index).setFont(font)
+        for row_index, row in enumerate(message_data):
+            for col_index, col_name in enumerate(self.sqlite_table_col_names):
+                for message_id in opened_message_id:
+                    if row['message_id'] == message_id[0]:
+                        # print("------------col_index----------\n", col_index)
+                        font = QtGui.QFont()
+                        font.setBold(False)
+                        self.message_table.item(row_index, col_index).setFont(font)
 
-    def connect_to_sqlite(self):
+    def connect_to_sqlite(self, verbose=True):
         """ ფუნქცია უკავშირდება წაკითხული შეტყობინებების ბაზას (sqlite) """
 
-        # უკავშირდება არსებულ sqlite ბაზას
-        self.conn = sqlite3.connect('ies_monitor.db')
+        try:
+            # უკავშირდება არსებულ sqlite ბაზას
+            sqlite_connection = sqlite3.connect('ies_monitor.db')
+            if verbose is True:
+                logger.debug("sqlite ბაზასთან კავშირი დამყარებულია")
+        except Exception as ex:
+            if verbose is True:
+                logger.error("sqlite ბაზასთან კავშირი ვერ დამყარდა\n", str(ex))
+            return False
+        return sqlite_connection
 
-        # მონაცემების ლისტად წამოღება
-        self.conn.row_factory = lambda cursor, rows: rows[0]
+    # def select_opened_message_id_sqlite(self):
+    #     """ ვკითხულობთ წაკითხული შეტყობინებების ID -ს sqlite ბაზიდან """
 
-        self.sqlite_cursor = self.conn.cursor()
+    #     # sqlite-ის ბაზასთან დაკავშირება
+    #     sqlite_connection = self.connect_to_sqlite(verbose=False)
+    #     if sqlite_connection:
+    #         logger.debug("sqlite ბაზასთან დამყარდა კავშირი წაკითხული შეტყობინებების წამოსაღებად")
+    #     elif sqlite_connection is False:
+    #         logger.warning("sqlite ბაზასთან ვერ დამყარდა კავშირი წაკითხული შეტყობინებების წამოსაღებად")
+    #         return False
 
-    def select_message_id_sqlite(self):
-        """ ვკითხულობთ შეტყობინების ID -ს წაკითხული შეტყობინებების ბაზიდან  """
+    #     # მონაცემების ლისტად წამოღება
+    #     sqlite_connection.row_factory = lambda cursor, rows: rows[0]
 
-        self.sqlite_cursor.execute("SELECT message_id FROM opened_messages")
-        self.get_id = self.sqlite_cursor.fetchall()
+    #     sqlite_cursor = sqlite_connection.cursor()
 
-    def insert_to_sqlite(self):
-        """ ვწერთ გახსნილი შეტყობინების ID -ს sqlite ბაზაში,
+    #     sqlite_cursor.execute("""SELECT message_id FROM messages where "opened" = 1 """)
+    #     get_id = sqlite_cursor.fetchall()
+    #     sqlite_cursor.close()
+    #     sqlite_connection.close()
+    #     return get_id
+
+    def insert_opened_messages_to_sqlite(self):
+        """ გახსნილი შეტყობინების opened უჯრაში იწერება 1-იანი,
             შეტყობინების ID -ები არ იწერება ხელმეორედ """
 
-        self.select_message_id_sqlite()
-        if self.load_message['message_id'] in self.get_id:
-            pass
+        # sqlite-ის ბაზასთან დაკავშირება
+        sqlite_connection = self.connect_to_sqlite()
+
+        if sqlite_connection:
+            logger.debug("sqlite ბაზასთან დამყარდა კავშირი წაკითხული შეტყობინების გახსნილად მონიშნისთვის ბაზაში")
         else:
-            self.sqlite_cursor.execute(
-                """INSERT INTO "opened_messages" ("message_id","status")
-                   VALUES ('{}','{}')""".format(self.load_message['message_id'], 1)
-            )
-            self.conn.commit()
-
-        # self.sqlite_cursor.close()  # ???
-        # self.conn.close()
-
-    def connect_to_mysql(self):
-        """ ფუნქცია უკავშირდება Mysql სერვერს"""
-
-        try:
-            self.mysql_connection = pymysql.connect(
-                mysql_server_ip,
-                mysql_server_user,
-                mysql_user_pass,
-                mysql_database_name,
-                port=mysql_server_port
-            )
-            logger.info("მონაცემთა ბაზასთან კავშირი დამყარებულია")
-            self.cursor = self.mysql_connection.cursor(pymysql.cursors.DictCursor)
-        except Exception as ex:
-            logger.warning("მონაცემთა ბაზასთან კავშირი წარუმატებელია\n" + str(ex))
+            logger.warning("sqlite ბაზასთან ვერ დამყარდა კავშირი და შეტყობინება არ მოინიშნა წაკითხულად ბაზაში")
             return False
-        return self.cursor
+
+        sqlite_cursor = sqlite_connection.cursor()
+
+        # sqlite ბაზაში ნახლდება წაკითხული შეტყობინების opened ველი 1-ით
+        sqlite_cursor.execute(
+            """ UPDATE "messages"
+                SET "opened" = 1
+                WHERE "message_id" = '{}' AND "opened" != 1 """.format(self.load_message["message_id"])
+        )
+
+        sqlite_connection.commit()
+
+        sqlite_cursor.close()
+        sqlite_connection.close()
 
     def set_qtablewidget_style(self):
         """ ფუნქცია აყენებს QTableWidgets -ის დიზაინის პარამეტრებს """
@@ -781,35 +824,169 @@ class MainWindow(QtWidgets.QMainWindow):
         # self.message_table.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
 
         # სვეტების რაოდენობა
-        self.message_table.setColumnCount(len(self.mysql_table_col_names))
+        self.message_table.setColumnCount(len(self.sqlite_table_col_names))
 
         # ვანიჭებთ სვეტებს შესაბამის სახელებს
-        self.message_table.setHorizontalHeaderLabels(self.mysql_table_col_readable_names)
+        self.message_table.setHorizontalHeaderLabels(self.sqlite_table_col_readable_names)
         self.message_table.setColumnHidden(4, True)
         self.message_table.setColumnHidden(0, True)
         # self.message_table.horizontalHeader().setStretchLastSection(True)
         self.message_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
         self.message_table.horizontalHeader().setSectionsMovable(True)
 
-    def load_messages_from_mysql(self):
-        """ mysql ბაზიდან კითხულობს შეტყობინებებს და სვავს message_table -ის შესაბამის სტრიქონში """
+    def load_messages_from_sqlite(self):
+        """ sqlite ბაზიდან კითხულობს შეტყობინებებს """
 
-        query = "SELECT " + ", ".join(self.mysql_table_col_names) + " FROM messages"
-        self.cursor.execute(query)
-        self.message_data = self.cursor.fetchall()
-        self.mysql_connection.commit()
+        # ვიძახებთ connect_to_sqlite ფუნქციას
+        sqlite_connection = self.connect_to_sqlite()
+
+        if sqlite_connection:
+            logger.debug("sqlite ბაზასთან დამყარდა კავშირი შეტყობინებების წამოსაღებად")
+        else:
+            logger.error("ვერ დამყარდა კავშირი sqlite ბაზასთან შეტყობინებების წამოსაღებად")
+            return False
+
+        # მონაცემების dictionary ტიპით წამოღება
+        sqlite_connection.row_factory = sqlite3.Row
+
+        sqlite_cursor = sqlite_connection.cursor()
+
+        query = "SELECT " + ", ".join(self.sqlite_table_col_names) + " FROM messages"
+
+        sqlite_cursor.execute(query)
+        message_data = sqlite_cursor.fetchall()
+
+        sqlite_connection.commit()
+
+        sqlite_cursor.close()
+        sqlite_connection.close()
+
+        return message_data
+
+    def load_messages_in_ies_monitor(self, message_data):
+        """ ფუნქცია მოწოდებულ შეტყობინებებს სვამს ies message_table-ის შესაბამის სტრიქონში """
+
         self.message_table.setRowCount(0)
-        for row_index, row in enumerate(self.message_data):
+        for row_index, row in enumerate(message_data):
             self.message_table.insertRow(row_index)
-            for col_index, col_name in enumerate(self.mysql_table_col_names):
+            for col_index, col_name in enumerate(self.sqlite_table_col_names):
                 self.message_table.setItem(row_index, col_index,
                                            QtWidgets.QTableWidgetItem(str(row[col_name])))
 
-    def message_table_double_click(self):
+    def write_messages_to_sqlite(self, message):
+        """
+            ფუნქცია ies_monitoring_server-იდან მიღებულ შეტყობინებებს წერს sqlite ბაზაში.
+            შეტყობინებების თანმიმდევრობა ემთხვევა mysql ბაზის თანმიმდევრობას.
+        """
+
+        # sqlite-ის ბაზასთან დაკავშირება
+        sqlite_connection = self.connect_to_sqlite()
+
+        if sqlite_connection:
+            logger.debug("sqlite ბაზასთან დამყარდა კავშირი შეტყობინებების ჩასაწერად")
+        else:
+            logger.warning("sqlite ბაზასთან ვერ დამყარდა კავშირი შეტყობინებების ჩასაწერად")
+
+        # იცვლება sqlite-ის ბაზაში წერის რეჟიმი
+        sqlite_connection.execute('pragma journal_mode = wal')
+
+        # normal პარამეტრის დაყენებით, ხდება sqlite-ის ოპტიმიზაცია
+        sqlite_connection.execute('pragma synchronous = normal')
+
+        sqlite_connection.commit()
+
+        # მონაცემების ლისტად წამოღება
+        sqlite_connection.row_factory = lambda cursor, row: row[0]
+
+        sqlite_cursor = sqlite_connection.cursor()
+
+        message_data = message["message_data"]
+
+        print("------------------------MESSAGE_DATA--------------------------------\n", message_data)
+
+        while message_data:
+            # time.sleep(delay)
+            for message in message_data:
+                # time.sleep(delay)
+
+                sqlite_cursor.execute(""" SELECT MAX("id") FROM "messages" """)
+
+                # sqlite ბაზაში არსებული ბოლო შეტყობინების ID (ნომერი)
+                get_last_message_id = sqlite_cursor.fetchone()
+
+                sqlite_connection.commit()
+
+                if get_last_message_id is None:
+                    get_last_message_id = 0
+
+                # წავიკითხოთ შეტყობინების message_id
+                message_id = message["message_id"]
+
+                # წავიკითხოთ შეტყობინების id
+                primary_id = message["id"]
+
+                print("++++++++++++++primary_id= ", primary_id)
+
+                # დავთვალოთ მონაცემთა ბაზაში დუპლიკატი შეტყობინებების რაოდენობა
+                count = "SELECT COUNT(*) as cnt FROM messages WHERE message_id = '{}'".format(message_id)
+                sqlite_cursor.execute(count)
+                sqlite_connection.commit()
+
+                # გამეორებული შეტყობინებების რაოდენობა
+                duplicate_message_count = sqlite_cursor.fetchone()
+
+                # if duplicate_message_count is None:
+                #     duplicate_message_count = 0
+
+                # ვამოწმებთ მოცემული შეტყობინება მეორდება თუ არა sqlite ბაზაში
+                if duplicate_message_count == 0:
+                    if primary_id - get_last_message_id == 1:
+                        index = message_data.index(message)
+
+                        # წავიკითხოთ შეტყობინების დრო
+                        sent_message_datetime = message["sent_message_datetime"]
+
+                        # წავიკითხოთ შეტყობინების ტიპი
+                        message_type = message["message_type"]
+
+                        # წავიკითხოთ შეტყობინების სათაური
+                        message_title = message["message_title"]
+
+                        # წავიკითხოთ შეტყობინების ტექსტი
+                        text = message["text"]
+
+                        # წავიკითხოთ Client-ის ip მისამართი საიდანაც მოვიდა შეტყობინება
+                        client_ip = message["client_ip"]
+
+                        # წავიკითხოთ client-ის სკრიპტის სახელი საიდანაც მოვიდა შეტყობინება
+                        client_script_name = message["client_script_name"]
+
+                        insert_statement = "INSERT INTO `messages` \
+                        (`message_id`, `sent_message_datetime`, `message_type`, `message_title`, `text`, `client_ip`, `client_script_name`) \
+                        VALUES('{}', '{}', '{}', '{}', '{}', '{}', '{}')".format(message_id, sent_message_datetime, message_type,
+                                                                                 message_title, text, client_ip, client_script_name)
+                        try:
+                            sqlite_cursor.execute(insert_statement)
+                            sqlite_connection.commit()
+                            del message_data[index]
+                            logger.debug("შეტყობინება ჩაიწერა ბაზაში. შეტყობინების ID: " + message["message_id"])
+                            break
+                        except Exception as ex:
+                            logger.error("არ ჩაიწერა შემდეგი მესიჯი ბაზაში: " + str(message) + "\n" + str(ex))
+
+                # დუპლიკატ შეტყობინებას არ ვწერთ sqlite ბაზაში
+                else:
+                    logger.warning("მონაცემთა ბაზაში შეტყობინება {" + message_id + "} "
+                                   "უკვე არსებობს და აღარ მოხდა მისი ხელმეორედ ჩაწერა")
+
+        sqlite_cursor.close()
+        sqlite_connection.close()
+
+    def message_table_double_click(self, message_data):
         """
             ფუნქცია გამოიძახება სტრიქონზე მაუსის ორჯერ დაჭერისას.
             იძახებს dialog ფანჯარას და ავსებს მონიშნული შეტყობინების მონაცემებით,
-            მონიშნული შეტყობინების ID -ს წერს წაკითხული შეტყობინებების ბაზაში (sqlite),
+            მონიშნული შეტყობინების opened უჯრაში იწერება 1-იანი,
             უცვლის წაკითხულ შეტყობინებას ფერს.
         """
 
@@ -817,26 +994,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui = Ui_Dialog()
         self.ui.setupUi(dialog)
         selected_row_index = []
+
         for idx in self.message_table.selectedIndexes():
             selected_row_index.append(idx.row())
 
-        for row_index, row in enumerate(self.message_data):
+        for row_index, row in enumerate(message_data):
             if row_index == selected_row_index[0]:
                 self.load_message = row
 
         self.load_message_data()
 
-        self.connect_to_sqlite()
+        self.insert_opened_messages_to_sqlite()
 
-        self.insert_to_sqlite()
-
-        self.select_message_id_sqlite()
+        # get_id = self.select_opened_message_id_sqlite()
 
         font = QtGui.QFont()
         font.setBold(False)
-        if self.load_message['message_id'] in self.get_id:
-            for col_index, col_name in enumerate(self.mysql_table_col_names):
-                self.message_table.item(selected_row_index[0], col_index).setFont(font)
+
+        # if self.load_message['message_id'] in get_id:
+        for col_index, col_name in enumerate(self.sqlite_table_col_names):
+            self.message_table.item(selected_row_index[0], col_index).setFont(font)
 
         dialog.show()
         dialog.exec_()
