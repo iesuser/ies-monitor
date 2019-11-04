@@ -75,8 +75,12 @@ WSGI_APPLICATION = 'ies_monitor.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.path.join(BASE_DIR, 'db.sqlite3'),
+        'ENGINE': 'django.db.backends.mysql',
+        'NAME': 'ies_monitor',
+        'USER': 'ies_monitor',
+        'PASSWORD': 'E39u4dOPXbYV4mNz@',
+        'HOST': '127.0.0.1',
+        'PORT': '3306',
     }
 }
 
